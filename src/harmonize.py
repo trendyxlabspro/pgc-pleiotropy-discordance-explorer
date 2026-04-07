@@ -154,35 +154,69 @@ def trait_table(traits: Iterable[TraitSpec]) -> pd.DataFrame:
 
 def resolve_trait_config(trait: TraitSpec) -> dict[str, Any]:
     """Choose a usable config by previewing real rows through `datasets`."""
-    available_configs = get_dataset_config_names(trait.dataset_id)
+    config_lookup_note = ""
+    try:
+        available_configs = get_dataset_config_names(trait.dataset_id)
+    except Exception as exc:  # pragma: no cover - notebook safety path
+        available_configs = [trait.preferred_config, *trait.fallbacks]
+        config_lookup_note = f"config lookup fell back to curated defaults because dataset listing failed ({exc})"
     seen: set[str] = set()
-    candidates = [trait.preferred_config, *trait.fallbacks, *available_configs]
+    curated_candidates = [trait.preferred_config, *trait.fallbacks]
+    candidates = [candidate for candidate in curated_candidates if candidate in available_configs]
+    if not candidates:
+        candidates = curated_candidates
     inspected: list[str] = []
 
     for config in candidates:
-        if config in seen or config not in available_configs:
+        if config in seen:
             continue
         seen.add(config)
+
+        preview_columns: list[str] = []
         try:
             preview_rows = fetch_preview_rows(trait.dataset_id, config)
+            preview_columns = list(preview_rows[0].keys()) if preview_rows else []
+            if is_summary_stat_schema(preview_columns):
+                reason = (
+                    "preferred config is usable"
+                    if config == trait.preferred_config
+                    else f"fell back after previewing malformed or unusable schemas: {'; '.join(inspected)}"
+                )
+                if config_lookup_note:
+                    reason = f"{reason}; {config_lookup_note}"
+                return {
+                    "available_configs": available_configs,
+                    "selected_config": config,
+                    "preview_columns": preview_columns,
+                    "selection_reason": reason,
+                }
+            inspected.append(f"{config}: first streamed rows were not GWAS summary rows")
         except Exception as exc:  # pragma: no cover - notebook safety path
             inspected.append(f"{config}: preview error ({exc})")
-            continue
 
-        preview_columns = list(preview_rows[0].keys()) if preview_rows else []
-        if is_summary_stat_schema(preview_columns):
-            reason = (
-                "preferred config is usable"
-                if config == trait.preferred_config
-                else f"fell back after previewing malformed or unusable schemas: {'; '.join(inspected)}"
+        try:
+            parquet_columns = fetch_preview_columns_from_parquet(
+                dataset_id=trait.dataset_id,
+                config=config,
+                exclude_suffixes=trait.exclude_parquet_suffixes,
             )
-            return {
-                "available_configs": available_configs,
-                "selected_config": config,
-                "preview_columns": preview_columns,
-                "selection_reason": reason,
-            }
-        inspected.append(f"{config}: missing GWAS columns")
+            if is_summary_stat_schema(parquet_columns):
+                reason = (
+                    "preferred config is usable after parquet schema inspection"
+                    if config == trait.preferred_config
+                    else f"fell back after preview/parquet inspection: {'; '.join(inspected)}"
+                )
+                if config_lookup_note:
+                    reason = f"{reason}; {config_lookup_note}"
+                return {
+                    "available_configs": available_configs,
+                    "selected_config": config,
+                    "preview_columns": parquet_columns,
+                    "selection_reason": reason,
+                }
+            inspected.append(f"{config}: parquet schema missing GWAS columns")
+        except Exception as exc:  # pragma: no cover - notebook safety path
+            inspected.append(f"{config}: parquet schema error ({exc})")
 
     raise RuntimeError(
         f"Could not find a usable config for {trait.dataset_id}. "
@@ -265,6 +299,35 @@ def get_parquet_urls(
     return urls
 
 
+def fetch_preview_columns_from_parquet(
+    dataset_id: str,
+    config: str,
+    exclude_suffixes: Iterable[str] = (),
+    max_files: int = 3,
+) -> list[str]:
+    """
+    Inspect parquet schemas directly.
+
+    This is more robust than streaming the first row because some OpenMed configs
+    begin with a metadata shard before the real summary-stat shards.
+    """
+    urls = get_parquet_urls(
+        dataset_id=dataset_id,
+        config=config,
+        exclude_suffixes=exclude_suffixes,
+    )
+    if not urls:
+        return []
+
+    candidate_columns: list[str] = []
+    for url in urls[:max_files]:
+        schema = pl.scan_parquet(url, low_memory=True, retries=3).collect_schema()
+        candidate_columns = list(schema.names())
+        if is_summary_stat_schema(candidate_columns):
+            return candidate_columns
+    return candidate_columns
+
+
 def extract_trait_hits(
     trait: TraitSpec,
     p_threshold: float = GENOME_WIDE_SIGNIFICANCE,
@@ -293,11 +356,25 @@ def extract_trait_hits(
                 p_threshold=p_threshold,
                 top_n=top_n,
             )
-        except Exception as exc:  # pragma: no cover - operational fallback
+        except BaseException as exc:  # pragma: no cover - operational fallback
             print(
                 f"[warn] Polars extraction failed for {trait.disorder} {config}: {exc}. "
-                "Falling back to datasets streaming."
+                "Falling back to pandas/pyarrow parquet scanning."
             )
+
+    try:
+        return extract_trait_hits_parquet(
+            trait=trait,
+            config=config,
+            column_map=column_map,
+            p_threshold=p_threshold,
+            top_n=top_n,
+        )
+    except Exception as exc:  # pragma: no cover - operational fallback
+        print(
+            f"[warn] Pandas parquet extraction failed for {trait.disorder} {config}: {exc}. "
+            "Falling back to datasets streaming."
+        )
 
     return extract_trait_hits_streaming(
         trait=trait,
@@ -345,7 +422,7 @@ def extract_trait_hits_polars(
     if not urls:
         raise RuntimeError(f"No parquet URLs were found for {trait.dataset_id}::{config}.")
 
-    lazy = pl.scan_parquet(urls, low_memory=True, retries=3)
+    lazy = pl.scan_parquet(urls, low_memory=True, retries=3, allow_missing_columns=True)
 
     p_expr = _optional_expr(column_map.get("p"), dtype=pl.Float64)
     beta_expr = _optional_expr(column_map.get("beta"), dtype=pl.Float64)
@@ -439,6 +516,101 @@ def extract_trait_hits_streaming(
     top_records = [item[2] for item in sorted(top_heap, key=lambda x: (-x[0], x[1]))]
     combined = pd.DataFrame(significant_records + top_records)
     return finalize_trait_hits(combined, trait=trait, config=config)
+
+
+def extract_trait_hits_parquet(
+    trait: TraitSpec,
+    config: str,
+    column_map: dict[str, str],
+    p_threshold: float,
+    top_n: int,
+) -> pd.DataFrame:
+    """Robust fallback that scans parquet shards one-by-one with pandas/pyarrow."""
+    urls = get_parquet_urls(
+        dataset_id=trait.dataset_id,
+        config=config,
+        exclude_suffixes=trait.exclude_parquet_suffixes,
+    )
+    if not urls:
+        raise RuntimeError(f"No parquet URLs were found for {trait.dataset_id}::{config}.")
+
+    significant_chunks: list[pd.DataFrame] = []
+    running_top = pd.DataFrame()
+
+    for url in tqdm(urls, desc=f"Scanning parquet shards for {trait.disorder}:{config}"):
+        raw = pd.read_parquet(url, engine="pyarrow")
+        chunk = normalize_chunk_frame(raw=raw, trait=trait.disorder, config=config, column_map=column_map)
+        if chunk.empty:
+            continue
+
+        significant_chunks.append(chunk[chunk["p"] < p_threshold].copy())
+        top_chunk = chunk.nsmallest(min(top_n, len(chunk)), "p")
+        running_top = (
+            pd.concat([running_top, top_chunk], ignore_index=True)
+            .nsmallest(top_n, "p")
+            .reset_index(drop=True)
+        )
+
+    combined_parts = [frame for frame in significant_chunks if not frame.empty]
+    if not running_top.empty:
+        combined_parts.append(running_top)
+    combined = pd.concat(combined_parts, ignore_index=True) if combined_parts else pd.DataFrame()
+    return finalize_trait_hits(combined, trait=trait, config=config)
+
+
+def normalize_chunk_frame(
+    raw: pd.DataFrame,
+    trait: str,
+    config: str,
+    column_map: dict[str, str],
+) -> pd.DataFrame:
+    """Normalize one parquet shard into the canonical schema."""
+    frame = pd.DataFrame(index=raw.index)
+
+    frame["trait"] = trait
+    frame["config"] = config
+    frame["snp"] = _series_or_none(raw, column_map.get("snp"))
+    frame["chr"] = _series_or_none(raw, column_map.get("chr"))
+    frame["pos"] = _series_or_none(raw, column_map.get("pos"))
+    frame["a1"] = _series_or_none(raw, column_map.get("a1"))
+    frame["a2"] = _series_or_none(raw, column_map.get("a2"))
+    frame["se"] = _numeric_series_or_nan(raw, column_map.get("se"))
+    frame["p"] = _numeric_series_or_nan(raw, column_map.get("p"))
+    frame["info"] = _numeric_series_or_nan(raw, column_map.get("info"))
+    frame["eaf"] = _numeric_series_or_nan(raw, column_map.get("eaf"))
+    frame["n"] = _numeric_series_or_nan(raw, column_map.get("n"))
+    frame["ncases"] = _numeric_series_or_nan(raw, column_map.get("ncases"))
+    frame["ncontrols"] = _numeric_series_or_nan(raw, column_map.get("ncontrols"))
+    frame["source_file"] = _series_or_none(raw, column_map.get("source_file"))
+
+    beta = _numeric_series_or_nan(raw, column_map.get("beta"))
+    or_series = _numeric_series_or_nan(raw, column_map.get("or"))
+    z_series = _numeric_series_or_nan(raw, column_map.get("z"))
+    beta = beta.where(beta.notna(), np.log(or_series.where(or_series > 0)))
+    beta = beta.where(beta.notna(), z_series * frame["se"])
+    frame["beta"] = beta
+
+    frame["chr"] = frame["chr"].apply(_normalize_chromosome)
+    frame["pos"] = pd.to_numeric(frame["pos"], errors="coerce").astype("Int64")
+    frame["a1"] = frame["a1"].apply(_normalize_allele)
+    frame["a2"] = frame["a2"].apply(_normalize_allele)
+    frame["snp"] = frame["snp"].apply(_safe_text)
+    frame["source_file"] = frame["source_file"].apply(_safe_text)
+
+    missing_snp = frame["snp"].isna() | (frame["snp"].astype("string").str.len().fillna(0) == 0)
+    frame.loc[missing_snp & frame["chr"].notna() & frame["pos"].notna(), "snp"] = (
+        frame.loc[missing_snp & frame["chr"].notna() & frame["pos"].notna(), "chr"].astype(int).astype(str)
+        + ":"
+        + frame.loc[missing_snp & frame["chr"].notna() & frame["pos"].notna(), "pos"].astype(int).astype(str)
+    )
+
+    frame.loc[frame["n"].isna() & frame["ncases"].notna() & frame["ncontrols"].notna(), "n"] = (
+        frame["ncases"] + frame["ncontrols"]
+    )
+    frame["z"] = frame["beta"] / frame["se"]
+
+    frame = frame[frame["p"].notna() & (frame["p"] > 0) & frame["beta"].notna() & frame["snp"].notna()].copy()
+    return frame
 
 
 def normalize_row(
@@ -772,6 +944,18 @@ def _optional_expr(column_name: str | None, dtype: pl.DataType) -> pl.Expr:
     if column_name is None:
         return pl.lit(None, dtype=dtype)
     return pl.col(column_name).cast(dtype, strict=False)
+
+
+def _series_or_none(frame: pd.DataFrame, column_name: str | None) -> pd.Series:
+    if column_name is None or column_name not in frame.columns:
+        return pd.Series([None] * len(frame), index=frame.index, dtype="object")
+    return frame[column_name]
+
+
+def _numeric_series_or_nan(frame: pd.DataFrame, column_name: str | None) -> pd.Series:
+    if column_name is None or column_name not in frame.columns:
+        return pd.Series(np.nan, index=frame.index, dtype="float64")
+    return pd.to_numeric(frame[column_name], errors="coerce")
 
 
 def _numeric_column_or_nan(frame: pd.DataFrame, column_name: str) -> pd.Series:
