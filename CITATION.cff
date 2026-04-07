@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: >-
+  If you use this repository, cite the software itself and also cite OpenMed_AI,
+  the Psychiatric Genomics Consortium (PGC), and the original PGC publication/config
+  for each dataset used. Data are accessed from the OpenMed_AI PGC Hugging Face collection
+  under CC-BY 4.0 and related upstream terms.
+title: AI-Augmented Transdiagnostic Pleiotropy & Discordance Explorer for PGC Psychiatric GWAS
+type: software
+version: 0.1.0
+date-released: 2026-04-07
+license: MIT
+abstract: >-
+  Reproducible transdiagnostic GWAS analysis workflow for the OpenMed_AI PGC collection on
+  Hugging Face. The pipeline harmonizes psychiatric summary statistics, ranks pleiotropic loci,
+  flags discordant loci with opposite aligned effects, builds shared-locus visualizations,
+  and exports AI-ready interpretation prompts. Data attribution is required to OpenMed_AI,
+  the Psychiatric Genomics Consortium, and the underlying PGC studies.
+authors:
+  - name: PGC Pleiotropy Explorer Contributors
+keywords:
+  - psychiatric genomics
+  - GWAS
+  - pleiotropy
+  - discordance
+  - OpenMed_AI
+  - Psychiatric Genomics Consortium
+  - bioinformatics
+  - reproducible research
+preferred-citation:
+  type: software
+  title: AI-Augmented Transdiagnostic Pleiotropy & Discordance Explorer for PGC Psychiatric GWAS
+  version: 0.1.0
+  date-released: 2026-04-07
+  authors:
+    - name: PGC Pleiotropy Explorer Contributors
+  license: MIT

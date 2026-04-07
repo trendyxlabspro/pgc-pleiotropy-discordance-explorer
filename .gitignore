@@ -1,0 +1,41 @@
+# Data attribution notice:
+# Generated outputs in this repository originate from analyses of CC-BY 4.0 data
+# from the OpenMed_AI PGC collection, derived from Psychiatric Genomics Consortium (PGC) studies.
+# Cite OpenMed_AI, PGC, and the underlying PGC publications when using outputs.
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local caches and analysis outputs
+results/cache/
+results/figures/*.png
+results/figures/*.pdf
+results/tables/*.csv
+results/tables/*.tsv
+results/*.md

@@ -1,0 +1,22 @@
+# Data attribution notice:
+# This repository analyzes CC-BY 4.0 data from the OpenMed_AI PGC collection on Hugging Face,
+# derived from Psychiatric Genomics Consortium (PGC) summary statistics.
+# Cite OpenMed_AI, PGC, and the original PGC publication/config used for each trait.
+
+biopython==1.84
+datasets==2.21.0
+huggingface-hub==0.24.7
+ipykernel==6.29.5
+jupyter==1.1.1
+matplotlib==3.9.2
+networkx==3.4.2
+numpy==2.1.3
+pandas==2.2.3
+polars==1.17.1
+pyarrow==18.1.0
+requests==2.32.3
+scikit-learn==1.5.2
+scipy==1.14.1
+seaborn==0.13.2
+tqdm==4.67.1
+upsetplot==0.9.0

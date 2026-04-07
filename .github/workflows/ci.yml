@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile source
+        run: |
+          python -m py_compile src/harmonize.py
+
+      - name: Validate notebook structure
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("notebooks/PGC_Pleiotropy_Discordance_Explorer.ipynb")
+          nb = json.loads(path.read_text())
+          for idx, cell in enumerate(nb["cells"]):
+              if cell["cell_type"] != "code":
+                  continue
+              compile("".join(cell["source"]), f"cell_{idx}", "exec")
+          print("Notebook structure is valid.")
+          PY
